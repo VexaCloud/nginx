@@ -19,6 +19,7 @@ server {
     
     location / {
         try_files $uri $uri/ /index.html;
+        
         location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
             expires 1y;
             add_header Cache-Control "public, immutable";
@@ -35,6 +36,26 @@ server {
         }
         
         set $target_url $arg_url;
+        
+        sub_filter_types text/html text/plain text/xml text/css application/javascript;
+        sub_filter_once off;
+        
+        sub_filter 'https://' '/proxy?url=https://';
+        sub_filter 'http://' '/proxy?url=http://';
+        sub_filter 'src="//' 'src="/proxy?url=https://';
+        sub_filter 'href="//' 'href="/proxy?url=https://';
+        sub_filter 'srcset="//' 'srcset="/proxy?url=https://';
+        sub_filter "fetch('http" "fetch('/proxy?url=http";
+        sub_filter 'fetch("http' 'fetch("/proxy?url=http';
+        sub_filter "fetch('https" "fetch('/proxy?url=https";
+        sub_filter 'fetch("https' 'fetch("/proxy?url=https';
+        sub_filter 'src="http' 'src="/proxy?url=http';
+        sub_filter "src='http" "src='/proxy?url=http";
+        sub_filter 'href="http' 'href="/proxy?url=http';
+        sub_filter "href='http" "href='/proxy?url=http";
+        sub_filter '<script src="http' '<script src="/proxy?url=http';
+        sub_filter "action='http" "action='/proxy?url=http";
+        sub_filter 'action="http' 'action="/proxy?url=http";
         
         proxy_pass $target_url;
         proxy_http_version 1.1;
@@ -57,30 +78,6 @@ server {
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
-    }
-    
-    location ~ ^/proxy$ {
-        sub_filter_types text/html text/plain text/xml text/css application/javascript;
-        sub_filter_once off;
-        
-        sub_filter 'https://' '/proxy?url=https://';
-        sub_filter 'http://' '/proxy?url=http://';
-        sub_filter 'src="//' 'src="/proxy?url=https://';
-        sub_filter 'href="//' 'href="/proxy?url=https://';
-        sub_filter 'srcset="//' 'srcset="/proxy?url=https://';
-        sub_filter "fetch('http" "fetch('/proxy?url=http";
-        sub_filter 'fetch("http' 'fetch("/proxy?url=http';
-        sub_filter "fetch('https" "fetch('/proxy?url=https";
-        sub_filter 'fetch("https' 'fetch("/proxy?url=https';
-        sub_filter 'src="http' 'src="/proxy?url=http';
-        sub_filter "src='http" "src='/proxy?url=http";
-        sub_filter 'href="http' 'href="/proxy?url=http';
-        sub_filter "href='http" "href='/proxy?url=http";
-        sub_filter '<script src="http' '<script src="/proxy?url=http';
-        sub_filter "action='http" "action='/proxy?url=http";
-        sub_filter 'action="http' 'action="/proxy?url=http";
-        
-        proxy_pass $target_url;
     }
     
     location /health {
