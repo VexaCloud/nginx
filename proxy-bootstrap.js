@@ -1,69 +1,45 @@
 // proxy-bootstrap.js
 (function () {
+  'use strict';
   const params = new URLSearchParams(location.search);
   const realUrl = params.get('url');
   if (!realUrl) return;
 
-  const real = new URL(realUrl);
-  const realOrigin = real.origin;
-  const realHref = real.href;
+  const realBase = realUrl;
   const PREFIX = '/proxy?url=';
 
-  function toProxy(u) {
-    if (!u || typeof u !== 'string' || u.includes(PREFIX)) return u;
-    if (/^(data:|blob:|javascript:|#|mailto:)/i.test(u)) return u;
+  function toProxy(url) {
+    if (!url || typeof url !== 'string' || url.includes(PREFIX)) return url;
+    if (/^(data:|blob:|javascript:|#|mailto:)/i.test(url)) return url;
 
     try {
-      if (u.startsWith('//')) u = 'https:' + u;
-      const abs = /^https?:\/\//i.test(u) ? u : new URL(u, realHref).href;
+      if (url.startsWith('//')) url = 'https:' + url;
+      const abs = /^https?:\/\//i.test(url) ? url : new URL(url, realBase).href;
       return PREFIX + encodeURIComponent(abs);
-    } catch { return u; }
+    } catch { return url; }
   }
 
-  // Spoof location
-  const locProxy = new Proxy(location, {
-    get(t, p) {
-      if (p === 'href') return realHref;
-      if (p === 'origin') return realOrigin;
-      if (p === 'hostname' || p === 'host') return real.hostname;
-      return t[p];
-    },
-    set(t, p, v) {
-      if (p === 'href') { location.assign(v); return true; }
-      t[p] = v; return true;
-    }
-  });
-  Object.defineProperty(window, 'location', { value: locProxy, configurable: true });
+  // Register SW + send real base
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .then(reg => {
+        const msg = { type: 'SET_CONTEXT', base: realBase };
+        const sw = reg.installing || reg.waiting || reg.active;
+        if (sw) sw.postMessage(msg);
+        if (navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage(msg);
+      });
+  }
 
-  // Patch navigation
-  const _assign = Location.prototype.assign;
-  Location.prototype.assign = function(u) { _assign.call(this, toProxy(u)); };
-  Location.prototype.replace = Location.prototype.assign;
-
-  history.pushState = (s, t, u) => History.prototype.pushState.call(history, s, t, u ? toProxy(u) : u);
-  history.replaceState = (s, t, u) => History.prototype.replaceState.call(history, s, t, u ? toProxy(u) : u);
-
-  // fetch + XHR + clicks
-  const _fetch = window.fetch;
-  window.fetch = (input, init) => _fetch(toProxy(input), init);
-
-  const _open = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(m, url) { _open.call(this, m, toProxy(url)); };
-
+  // Basic navigation protection
   document.addEventListener('click', e => {
     const a = e.target.closest('a[href]');
     if (a) {
-      const h = a.getAttribute('href');
-      if (h && !/^(#|javascript:|mailto:)/i.test(h)) {
-        e.preventDefault(); e.stopImmediatePropagation();
-        location.href = toProxy(h);
+      const href = a.getAttribute('href');
+      if (href && !/^(#|javascript:|mailto:)/i.test(href)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        location.href = toProxy(href);
       }
     }
   }, true);
-
-  // Register SW
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js', {scope: '/'})
-      .then(r => r.active && r.active.postMessage({type: 'SET_CONTEXT', base: realHref}));
-  }
 })();
