@@ -1,64 +1,51 @@
 // sw.js — VexaProxy Service Worker
+// Uses Referer header to resolve relative paths — works without postMessage race conditions.
+
 const PROXY_PATH = '/proxy?url=';
-
-// Store context per-client so we don't rely on async postMessage
-const clientContexts = new Map();
-
-self.addEventListener('message', (e) => {
-  if (e.data && e.data.type === 'SET_CONTEXT' && e.source) {
-    clientContexts.set(e.source.id, {
-      origin: e.data.origin,
-      base:   e.data.base,
-    });
-  }
-});
+const OWN_PATHS  = new Set(['/sw.js', '/proxy-bootstrap.js', '/index.html', '/health']);
 
 self.addEventListener('install',  () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
-const OWN_PATHS = ['/sw.js', '/proxy-bootstrap.js', '/index.html', '/health'];
-
 self.addEventListener('fetch', (event) => {
-  const req  = event.request;
-  const url  = new URL(req.url);
-  const path = url.pathname;
+  const req = event.request;
+  const url = new URL(req.url);
 
   // Never touch our own static files
-  if (OWN_PATHS.includes(path)) return;
+  if (OWN_PATHS.has(url.pathname)) return;
 
-  // Already a proxied request — let it through
-  if (path.startsWith('/proxy')) return;
+  // Already a proxy request — let nginx handle it
+  if (url.pathname.startsWith('/proxy')) return;
 
-  // External absolute URL — proxy it directly
+  // External URL — route straight through proxy
   if (url.origin !== self.location.origin) {
-    event.respondWith(proxyFetch(req.url, req));
+    event.respondWith(doProxyFetch(req.url, req));
     return;
   }
 
-  // Request to our own origin that is NOT a proxy path and NOT a static file.
-  // This means it's a relative-path fetch from inside a proxied page
-  // (e.g. fetch('/api/data') or <img src="/images/logo.png">).
-  // Resolve it against the real origin extracted from the page's referrer.
-  const referrer = req.referrer || '';
-  const realBase = extractRealBase(referrer);
-
+  // Request to our own origin that isn't a static file or proxy path.
+  // This is a relative-path resource from inside a proxied page
+  // e.g. <img src="/images/logo.png"> or fetch('/api/v1/data')
+  // Recover the real base from the Referer header.
+  const realBase = getRealBaseFromReferer(req.referrer);
   if (realBase) {
     try {
-      const absolute = new URL(path + url.search + url.hash, realBase).href;
+      const absolute = new URL(url.pathname + url.search + url.hash, realBase).href;
       if (!absolute.startsWith(self.location.origin)) {
-        event.respondWith(proxyFetch(absolute, req));
+        event.respondWith(doProxyFetch(absolute, req));
         return;
       }
     } catch(e) {}
   }
 });
 
-// Extract the real proxied URL from a referrer like:
-// http://myserver/proxy?url=https%3A%2F%2Fwww.crazygames.com%2Fpath
-function extractRealBase(referrer) {
+// Parse the real proxied URL out of a referrer like:
+// https://shiny-giggle-...app.github.dev/proxy?url=https%3A%2F%2Fwww.crazygames.com%2F
+function getRealBaseFromReferer(referrer) {
   if (!referrer) return null;
   try {
     const ref = new URL(referrer);
+    // Works on any domain — just needs /proxy?url= path
     if (ref.pathname.startsWith('/proxy')) {
       const inner = ref.searchParams.get('url');
       if (inner) return decodeURIComponent(inner);
@@ -67,8 +54,8 @@ function extractRealBase(referrer) {
   return null;
 }
 
-function proxyFetch(targetUrl, req) {
-  const clean = fullyDecode(targetUrl);
+function doProxyFetch(targetUrl, req) {
+  const clean   = fullyDecode(targetUrl);
   const proxied = self.location.origin + PROXY_PATH + encodeURIComponent(clean);
 
   return fetch(proxied, {
@@ -82,19 +69,20 @@ function proxyFetch(targetUrl, req) {
 
 function fullyDecode(url) {
   try {
-    let prev = url;
-    while (true) {
-      const d = decodeURIComponent(prev);
-      if (d === prev || !/^https?:\/\//i.test(d)) break;
-      prev = d;
+    let s = url;
+    for (let i = 0; i < 3; i++) {
+      const d = decodeURIComponent(s);
+      if (d === s) break;
+      if (!/^https?:\/\//i.test(d)) break;
+      s = d;
     }
-    return prev;
+    return s;
   } catch(e) { return url; }
 }
 
 function sanitizeHeaders(headers) {
-  const out = new Headers();
   const blocked = new Set(['cookie','authorization','x-forwarded-for','x-real-ip','origin','referer']);
+  const out = new Headers();
   for (const [k, v] of headers.entries()) {
     if (!blocked.has(k.toLowerCase())) out.set(k, v);
   }
