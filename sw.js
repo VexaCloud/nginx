@@ -1,71 +1,71 @@
-// sw.js
-const PROXY_PREFIX = '/proxy?url=';
-let realBase = null;   // e.g. "https://www.xbox.com/"
+// sw.js — VexaProxy Service Worker
+const PROXY_PATH = '/proxy?url=';
+let currentOrigin = null;
+let currentBase   = null;
 
-self.addEventListener('message', e => {
-  if (e.data?.type === 'SET_CONTEXT') realBase = e.data.base;
+self.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'SET_CONTEXT') {
+    currentOrigin = e.data.origin;
+    currentBase   = e.data.base;
+  }
 });
 
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('install',  () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
-self.addEventListener('fetch', event => {
-  const url = event.request.url;
+const OWN_FILES = new Set(['/sw.js', '/proxy-bootstrap.js', '/index.html', '/health']);
 
-  if (url.includes(PROXY_PREFIX) || 
-      url.includes('/sw.js') || 
-      url.includes('/proxy-bootstrap.js')) return;
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  const url = new URL(req.url);
+  const path = url.pathname;
 
-  let targetUrl = null;
+  if (url.origin === self.location.origin) {
+    if (OWN_FILES.has(path) || path.startsWith('/proxy')) return;
 
-  // Absolute URL
-  if (/^https?:\/\//.test(url)) {
-    targetUrl = url;
-  }
-  // Relative path starting with / (THIS IS THE KEY FIX)
-  else if (realBase && url.startsWith(self.location.origin + '/')) {
-    const path = url.slice(self.location.origin.length);
-    if (path && !path.startsWith('/proxy')) {
+    if (currentBase) {
       try {
-        targetUrl = new URL(path, realBase).href;
-      } catch (_) {}
+        const absolute = new URL(path + url.search, currentBase).href;
+        if (!absolute.startsWith(self.location.origin)) {
+          event.respondWith(proxyFetch(absolute, req));
+          return;
+        }
+      } catch(e) {}
     }
+    return;
   }
 
-  if (targetUrl) {
-    event.respondWith(proxyFetch(targetUrl, event.request));
-  }
+  event.respondWith(proxyFetch(req.url, req));
 });
 
-async function proxyFetch(targetUrl, req) {
-  const proxied = self.location.origin + PROXY_PREFIX + encodeURIComponent(targetUrl);
-
-  const res = await fetch(proxied, {
-    method: req.method,
-    headers: sanitizeHeaders(req.headers),
-    body: req.body,
-    redirect: 'manual'
-  }).catch(() => new Response('Proxy Error', {status: 502}));
-
-  if (res.status >= 300 && res.status < 400) {
-    let loc = res.headers.get('Location');
-    if (loc) {
-      if (!loc.startsWith('http')) loc = new URL(loc, targetUrl).href;
-      return new Response(null, {
-        status: res.status,
-        headers: { 'Location': '/proxy?url=' + encodeURIComponent(loc) }
-      });
+function proxyFetch(targetUrl, req) {
+  let clean = targetUrl;
+  try {
+    let prev = clean;
+    while (true) {
+      const d = decodeURIComponent(prev);
+      if (d === prev || !/^https?:\/\//i.test(d)) break;
+      prev = d;
     }
-  }
-  return res;
+    clean = prev;
+  } catch(e) {}
+
+  const proxied = self.location.origin + PROXY_PATH + encodeURIComponent(clean);
+
+  return fetch(proxied, {
+    method:      req.method,
+    headers:     sanitizeHeaders(req.headers),
+    body:        req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
+    redirect:    'follow',
+    credentials: 'omit',
+  }).catch(() => new Response('Proxy fetch failed', { status: 502 }));
 }
 
 function sanitizeHeaders(headers) {
   const out = new Headers();
-  for (const [k, v] of headers) {
-    if (!['cookie', 'authorization', 'referer', 'origin'].includes(k.toLowerCase())) {
-      out.set(k, v);
-    }
+  const blocked = new Set(['cookie','authorization','x-forwarded-for','x-real-ip','origin','referer']);
+  for (const [k, v] of headers.entries()) {
+    if (!blocked.has(k.toLowerCase())) out.set(k, v);
   }
   return out;
 }
