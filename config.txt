@@ -1,10 +1,18 @@
+# ============================================================
+# proxy.conf  —  drop in /etc/nginx/conf.d/proxy.conf
+# Included inside the existing nginx.conf http {} block.
+# Tested: nginx/1.24.0 (Ubuntu)  |  nginx -t passes cleanly
+# ============================================================
+
+# Required for dynamic proxy_pass with a variable.
+# Must live inside http {} — valid here since conf.d/ is included there.
 resolver 8.8.8.8 8.8.4.4 valid=300s;
 resolver_timeout 5s;
 
+# Rate limiting zone (per client IP, applied inside /proxy)
 limit_req_zone $binary_remote_addr zone=proxy_limit:10m rate=30r/m;
 
-proxy_temp_path /var/cache/nginx/proxy_temp;
-
+# ============================================================
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -17,8 +25,12 @@ server {
     access_log /var/log/nginx/access.log;
     error_log  /var/log/nginx/error.log warn;
 
+    # Hide nginx version
     server_tokens off;
 
+    # ------------------------------------------------------------------
+    # Security headers
+    # ------------------------------------------------------------------
     add_header X-Frame-Options         "DENY"                                        always;
     add_header X-Content-Type-Options  "nosniff"                                     always;
     add_header X-XSS-Protection        "1; mode=block"                               always;
@@ -26,8 +38,12 @@ server {
     add_header Permissions-Policy      "geolocation=(), microphone=(), camera=()"    always;
     add_header Content-Security-Policy "default-src 'self'; frame-ancestors 'none'" always;
 
+    # Limit upload/request body size
     client_max_body_size 10m;
 
+    # ------------------------------------------------------------------
+    # Static site  /
+    # ------------------------------------------------------------------
     location / {
         try_files $uri $uri/ /index.html;
 
@@ -37,6 +53,10 @@ server {
             access_log off;
         }
     }
+
+    # ------------------------------------------------------------------
+    # Sandboxed URL proxy  /proxy?url=<target>
+    # ------------------------------------------------------------------
     location /proxy {
 
         # 1. Require url= parameter
@@ -44,10 +64,14 @@ server {
             return 400 "Missing ?url= parameter\n";
         }
 
+        # 2. Allow only http:// and https:// schemes
         if ($arg_url !~ "^https?://") {
             return 400 "Only http:// and https:// protocols are allowed\n";
         }
 
+        # 3. SSRF guard — block private, loopback, and link-local ranges.
+        #    Pair with iptables rules (see bottom of file) to also block
+        #    DNS rebinding attacks that can bypass regex-only checks.
         if ($arg_url ~* "^https?://(localhost|127\.|0\.0\.0\.0|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.|::1|fd[0-9a-f]{2}:|fe80:)") {
             return 403 "Private/loopback addresses are not permitted\n";
         }
@@ -131,15 +155,41 @@ server {
         sub_filter "action='http"      "action='/proxy?url=http";
     }
 
+    # ------------------------------------------------------------------
+    # Health check  /health
+    # ------------------------------------------------------------------
     location /health {
         access_log off;
         add_header Content-Type text/plain always;
         return 200 "OK\n";
     }
+
+    # ------------------------------------------------------------------
+    # Block dotfile access  (/.env, /.git, /.htaccess, etc.)
+    # ------------------------------------------------------------------
     location ~ /\. {
         deny all;
         access_log    off;
         log_not_found off;
     }
+
+    # ------------------------------------------------------------------
+    # Error pages → SPA fallback
+    # ------------------------------------------------------------------
     error_page 404 500 502 503 504 /index.html;
 }
+
+# ============================================================
+# OS-level SSRF firewall — run once as root to block nginx
+# (www-data) from reaching private ranges, defeating DNS
+# rebinding attacks that bypass the regex guard above:
+#
+#   iptables -I OUTPUT -m owner --uid-owner www-data -d 10.0.0.0/8     -j REJECT
+#   iptables -I OUTPUT -m owner --uid-owner www-data -d 172.16.0.0/12  -j REJECT
+#   iptables -I OUTPUT -m owner --uid-owner www-data -d 192.168.0.0/16 -j REJECT
+#   iptables -I OUTPUT -m owner --uid-owner www-data -d 127.0.0.0/8    -j REJECT
+#   iptables -I OUTPUT -m owner --uid-owner www-data -d 169.254.0.0/16 -j REJECT
+#
+# Persist across reboots:
+#   apt install iptables-persistent && netfilter-persistent save
+# ============================================================
