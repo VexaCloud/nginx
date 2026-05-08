@@ -1,163 +1,165 @@
-// proxy-bootstrap.js
-// Injected into every proxied HTML page by nginx sub_filter.
-// Responsibilities:
-//   1. Register /sw.js as a Service Worker to intercept all future fetches
-//   2. Tell the SW what the real origin of this page is
-//   3. Patch window.location and history so in-page navigation stays in proxy
-//   4. Patch XMLHttpRequest and fetch() as a fallback for browsers that are
-//      slow to activate the SW on first load
+// proxy-bootstrap.js — injected into every proxied HTML page by nginx sub_filter
+// Sandboxes ALL navigation, fetch, XHR, and link clicks inside the proxy.
 
 (function () {
   'use strict';
 
-  // ── Determine the real origin of the page we're proxying ────────────
-  // nginx has already rewritten the HTML, so we recover the original URL
-  // from the ?url= query param in our own page's URL, OR from the
-  // sub-filtered base href if present.
-  function getRealOrigin() {
+  // ── Recover the real URL this page was fetched from ─────────────────
+  // Our page URL is always /proxy?url=<encoded-target>
+  // e.g. /proxy?url=https%3A%2F%2Fwww.crazygames.com%2Fsome%2Fpath
+  function getRealUrl() {
     try {
-      // Our page URL is like: http://myserver/proxy?url=https://www.crazygames.com/...
-      const params = new URLSearchParams(window.location.search);
-      const proxyUrl = params.get('url');
-      if (proxyUrl) {
-        const u = new URL(proxyUrl);
-        return u.origin; // e.g. "https://www.crazygames.com"
-      }
-    } catch (e) {}
-    return null;
+      const p = new URLSearchParams(window.location.search);
+      const u = p.get('url');
+      return u ? new URL(u) : null;
+    } catch (e) { return null; }
   }
 
-  const realOrigin = getRealOrigin();
-  const PROXY_BASE = window.location.origin + '/proxy?url=';
+  const realParsed = getRealUrl();
+  const realOrigin = realParsed ? realParsed.origin : null; // https://www.crazygames.com
+  const realBase   = realParsed ? realParsed.href   : null; // full URL incl path, for relative resolution
 
-  // ── 1. Register Service Worker ───────────────────────────────────────
+  const PROXY_PREFIX = '/proxy?url=';
+  const MY_ORIGIN    = window.location.origin; // http://yourserver
+
+  // ── Register the Service Worker ─────────────────────────────────────
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { scope: '/' })
       .then(reg => {
-        // Tell the SW the real origin so it can resolve relative paths
+        const msg = { type: 'SET_CONTEXT', origin: realOrigin, base: realBase };
         const sw = reg.installing || reg.waiting || reg.active;
-        if (sw) {
-          sw.postMessage({ type: 'SET_ORIGIN', origin: realOrigin });
-        }
-        // Also message the active controller if different
+        if (sw && sw.state !== 'redundant') sw.postMessage(msg);
         if (navigator.serviceWorker.controller) {
-          navigator.serviceWorker.controller.postMessage({
-            type: 'SET_ORIGIN',
-            origin: realOrigin
-          });
+          navigator.serviceWorker.controller.postMessage(msg);
         }
-      })
-      .catch(() => {}); // SW unavailable (HTTP, private mode) — fallback patches cover it
+      }).catch(() => {});
   }
 
-  // ── 2. Rewrite any absolute URL to go through the proxy ─────────────
-  function proxyUrl(url) {
+  // ── Core URL rewriter ────────────────────────────────────────────────
+  function toProxy(url) {
     if (!url || typeof url !== 'string') return url;
-    // Already proxied
-    if (url.startsWith('/proxy?url=') || url.startsWith(window.location.origin + '/proxy?url=')) return url;
+    // Already proxied through us
+    if (url.startsWith(PROXY_PREFIX) || url.startsWith(MY_ORIGIN + PROXY_PREFIX)) return url;
+    // data:, blob:, javascript:, mailto:, #anchor — leave alone
+    if (/^(data:|blob:|javascript:|mailto:|#)/.test(url)) return url;
     // Absolute http/https
     if (/^https?:\/\//i.test(url)) {
-      return PROXY_BASE + encodeURIComponent(url);
+      return PROXY_PREFIX + encodeURIComponent(url);
     }
     // Protocol-relative
     if (url.startsWith('//')) {
-      return PROXY_BASE + encodeURIComponent('https:' + url);
+      return PROXY_PREFIX + encodeURIComponent('https:' + url);
     }
-    // Relative URL — resolve against real origin
-    if (realOrigin && !url.startsWith('data:') && !url.startsWith('blob:') && !url.startsWith('#')) {
+    // Relative URL — resolve against the REAL page URL (not our proxy URL)
+    if (realBase) {
       try {
-        const abs = new URL(url, realOrigin).href;
-        return PROXY_BASE + encodeURIComponent(abs);
+        const abs = new URL(url, realBase).href;
+        return PROXY_PREFIX + encodeURIComponent(abs);
       } catch (e) {}
     }
     return url;
   }
 
-  // ── 3. Patch window.location navigation ─────────────────────────────
-  // Intercepts window.location.href = '...' assignments
-  const locDescriptor = Object.getOwnPropertyDescriptor(window, 'location');
-  if (!locDescriptor || locDescriptor.configurable) {
-    try {
-      const origHref = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
-      Object.defineProperty(Location.prototype, 'href', {
-        set(val) { origHref.set.call(this, proxyUrl(val)); },
-        get()    { return origHref.get.call(this); },
-        configurable: true,
-      });
-    } catch (e) {}
-  }
-
-  // Intercepts window.location.assign() and .replace()
-  const origAssign  = window.location.assign.bind(window.location);
-  const origReplace = window.location.replace.bind(window.location);
+  // ── Patch window.location.href ───────────────────────────────────────
   try {
-    window.location.assign  = (url) => origAssign(proxyUrl(url));
-    window.location.replace = (url) => origReplace(proxyUrl(url));
+    const desc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+    Object.defineProperty(Location.prototype, 'href', {
+      set(val) { desc.set.call(this, toProxy(String(val))); },
+      get()    { return desc.get.call(this); },
+      configurable: true,
+    });
   } catch (e) {}
 
-  // ── 4. Patch history.pushState / replaceState ────────────────────────
-  const origPush    = history.pushState.bind(history);
-  const origReplace2 = history.replaceState.bind(history);
-  history.pushState = function (state, title, url) {
-    origPush(state, title, url ? proxyUrl(url) : url);
-  };
-  history.replaceState = function (state, title, url) {
-    origReplace2(state, title, url ? proxyUrl(url) : url);
-  };
+  // ── Patch location.assign / replace ─────────────────────────────────
+  try {
+    const origAssign  = Location.prototype.assign;
+    const origReplace = Location.prototype.replace;
+    Location.prototype.assign  = function(url) { origAssign.call(this,  toProxy(url)); };
+    Location.prototype.replace = function(url) { origReplace.call(this, toProxy(url)); };
+  } catch (e) {}
 
-  // ── 5. Patch fetch() as SW fallback ─────────────────────────────────
-  // The SW might not be active for the very first request on a cold install.
-  // This patch ensures even that first load is sandboxed.
-  const origFetch = window.fetch.bind(window);
-  window.fetch = function (input, init) {
-    let url = input instanceof Request ? input.url : String(input);
-    const proxied = proxyUrl(url);
-    if (proxied !== url) {
-      if (input instanceof Request) {
-        input = new Request(proxied, input);
-      } else {
-        input = proxied;
-      }
+  // ── Patch history ────────────────────────────────────────────────────
+  const _push    = history.pushState.bind(history);
+  const _replace = history.replaceState.bind(history);
+  history.pushState    = (s, t, url) => _push(s,    t, url ? toProxy(url) : url);
+  history.replaceState = (s, t, url) => _replace(s, t, url ? toProxy(url) : url);
+
+  // ── Patch fetch() ────────────────────────────────────────────────────
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    if (input instanceof Request) {
+      const proxied = toProxy(input.url);
+      if (proxied !== input.url) input = new Request(proxied, { method: input.method, headers: input.headers, body: input.body, mode: 'cors', credentials: 'omit' });
+    } else {
+      input = toProxy(String(input));
     }
-    return origFetch(input, init);
+    return _fetch(input, init);
   };
 
-  // ── 6. Patch XMLHttpRequest ──────────────────────────────────────────
-  const OrigXHR = window.XMLHttpRequest;
-  window.XMLHttpRequest = class extends OrigXHR {
-    open(method, url, ...args) {
-      return super.open(method, proxyUrl(url), ...args);
-    }
+  // ── Patch XMLHttpRequest ─────────────────────────────────────────────
+  const _open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    return _open.call(this, method, toProxy(String(url)), ...rest);
   };
 
-  // ── 7. Patch open() for popup windows ───────────────────────────────
-  const origOpen = window.open.bind(window);
-  window.open = function (url, ...args) {
-    return origOpen(url ? proxyUrl(url) : url, ...args);
-  };
+  // ── Patch window.open ────────────────────────────────────────────────
+  const _winOpen = window.open.bind(window);
+  window.open = (url, ...args) => _winOpen(url ? toProxy(url) : url, ...args);
 
-  // ── 8. Intercept <a> clicks before navigation fires ─────────────────
-  document.addEventListener('click', function (e) {
+  // ── Intercept <a> clicks (capture phase, before page handlers) ───────
+  document.addEventListener('click', function(e) {
     const a = e.target.closest('a[href]');
     if (!a) return;
     const href = a.getAttribute('href');
-    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
-    const proxied = proxyUrl(href);
+    if (!href || /^(#|javascript:|mailto:)/.test(href)) return;
+    const proxied = toProxy(href);
     if (proxied !== href) {
       e.preventDefault();
+      e.stopPropagation();
       window.location.href = proxied;
     }
-  }, true); // capture phase — fires before the page's own listeners
-
-  // ── 9. Intercept <form> submissions ─────────────────────────────────
-  document.addEventListener('submit', function (e) {
-    const form = e.target;
-    const action = form.getAttribute('action');
-    if (!action) return;
-    const proxied = proxyUrl(action);
-    if (proxied !== action) {
-      form.setAttribute('action', proxied);
-    }
   }, true);
+
+  // ── Intercept <form> submits ─────────────────────────────────────────
+  document.addEventListener('submit', function(e) {
+    const form = e.target;
+    const action = form.action || '';
+    const proxied = toProxy(action);
+    if (proxied !== action) form.action = proxied;
+  }, true);
+
+  // ── Patch document.createElement to catch dynamic script/img/link ────
+  const _createElement = document.createElement.bind(document);
+  document.createElement = function(tag, ...args) {
+    const el = _createElement(tag, ...args);
+    const tagLower = tag.toLowerCase();
+    if (tagLower === 'script' || tagLower === 'img' || tagLower === 'iframe') {
+      const srcDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'src') ||
+                      Object.getOwnPropertyDescriptor(Element.prototype, 'src');
+      if (srcDesc) {
+        try {
+          Object.defineProperty(el, 'src', {
+            set(val) { srcDesc.set.call(this, toProxy(String(val))); },
+            get()    { return srcDesc.get.call(this); },
+            configurable: true,
+          });
+        } catch(e) {}
+      }
+    }
+    if (tagLower === 'link') {
+      const hrefDesc = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, 'href') ||
+                       Object.getOwnPropertyDescriptor(Element.prototype, 'href');
+      if (hrefDesc) {
+        try {
+          Object.defineProperty(el, 'href', {
+            set(val) { hrefDesc.set.call(this, toProxy(String(val))); },
+            get()    { return hrefDesc.get.call(this); },
+            configurable: true,
+          });
+        } catch(e) {}
+      }
+    }
+    return el;
+  };
 
 })();
