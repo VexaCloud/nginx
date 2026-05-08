@@ -1,11 +1,9 @@
 // sw.js
 const PROXY_PREFIX = '/proxy?url=';
-let realBase = null;
+let realBase = null;   // e.g. "https://www.xbox.com/"
 
 self.addEventListener('message', e => {
-  if (e.data?.type === 'SET_CONTEXT') {
-    realBase = e.data.base;
-  }
+  if (e.data?.type === 'SET_CONTEXT') realBase = e.data.base;
 });
 
 self.addEventListener('install', () => self.skipWaiting());
@@ -14,27 +12,28 @@ self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', event => {
   const url = event.request.url;
 
-  // Skip our own files
-  if (url.includes(PROXY_PREFIX) || url.includes('/sw.js') || url.includes('/proxy-bootstrap.js')) {
-    return;
-  }
+  if (url.includes(PROXY_PREFIX) || 
+      url.includes('/sw.js') || 
+      url.includes('/proxy-bootstrap.js')) return;
 
-  // Absolute external URL
+  let targetUrl = null;
+
+  // Absolute URL
   if (/^https?:\/\//.test(url)) {
-    event.respondWith(proxyFetch(url, event.request));
-    return;
+    targetUrl = url;
   }
-
-  // === CRITICAL: Relative paths ===
-  if (realBase && url.startsWith(self.location.origin)) {
+  // Relative path starting with / (THIS IS THE KEY FIX)
+  else if (realBase && url.startsWith(self.location.origin + '/')) {
     const path = url.slice(self.location.origin.length);
     if (path && !path.startsWith('/proxy')) {
       try {
-        const absolute = new URL(path, realBase).href;
-        event.respondWith(proxyFetch(absolute, event.request));
-        return;
+        targetUrl = new URL(path, realBase).href;
       } catch (_) {}
     }
+  }
+
+  if (targetUrl) {
+    event.respondWith(proxyFetch(targetUrl, event.request));
   }
 });
 
@@ -48,7 +47,6 @@ async function proxyFetch(targetUrl, req) {
     redirect: 'manual'
   }).catch(() => new Response('Proxy Error', {status: 502}));
 
-  // Handle redirects
   if (res.status >= 300 && res.status < 400) {
     let loc = res.headers.get('Location');
     if (loc) {
@@ -65,7 +63,7 @@ async function proxyFetch(targetUrl, req) {
 function sanitizeHeaders(headers) {
   const out = new Headers();
   for (const [k, v] of headers) {
-    if (!['cookie','authorization','referer'].includes(k.toLowerCase())) {
+    if (!['cookie', 'authorization', 'referer', 'origin'].includes(k.toLowerCase())) {
       out.set(k, v);
     }
   }
