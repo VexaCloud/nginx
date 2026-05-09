@@ -1,1 +1,0 @@
-It kind of works now except it doesn't properly sandbox it. For example when I go to crazygames.com it shows a game over 404 page, and when I press Go Home it takes me outside of the proxy to crazygames.com!
