@@ -1,17 +1,11 @@
-// proxy-bootstrap.js — injected into every proxied HTML page by nginx sub_filter
-// Handles all navigation, redirects, fetch, XHR inside the proxy sandbox.
-
+// proxy-bootstrap.js — injected into every proxied HTML page
 (function () {
   'use strict';
 
-  // ── Get the real URL this page represents ───────────────────────────
-  // Our page URL is always /proxy?url=<encoded>
-  // We decode it carefully to avoid double-encoding issues.
   function getRealParsed() {
     try {
       const raw = new URLSearchParams(window.location.search).get('url');
       if (!raw) return null;
-      // Decode up to 3 levels (handles double-encoding from proxy_redirect etc.)
       let u = raw;
       for (let i = 0; i < 3; i++) {
         const d = decodeURIComponent(u);
@@ -29,30 +23,23 @@
   const MY_ORIGIN  = window.location.origin;
   const PROXY_PATH = '/proxy?url=';
 
-  // ── Register Service Worker ──────────────────────────────────────────
+  // Register SW — reload once it activates so it catches all sub-resources
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { scope: '/' })
       .then(reg => {
-        // Claim immediately so the SW is active for this page's sub-resources
         if (reg.installing) {
           reg.installing.addEventListener('statechange', function() {
-            if (this.state === 'activated') {
-              // SW now active — reload so it can intercept all fetches
-              window.location.reload();
-            }
+            if (this.state === 'activated') window.location.reload();
           });
         }
       }).catch(() => {});
   }
 
-  // ── Core URL rewriter ────────────────────────────────────────────────
   function toProxy(url) {
     if (!url || typeof url !== 'string') return url;
-
-    // Leave these alone
     if (/^(data:|blob:|javascript:|mailto:|tel:|#)/.test(url)) return url;
 
-    // Decode any encoding first
+    // Decode any double-encoding
     let clean = url;
     for (let i = 0; i < 3; i++) {
       try {
@@ -63,7 +50,7 @@
       } catch(e) { break; }
     }
 
-    // Already correctly proxied — normalise and return
+    // Already proxied — normalise
     if (clean.startsWith(PROXY_PATH)) {
       try {
         const inner = new URLSearchParams(clean.slice('/proxy?'.length)).get('url');
@@ -74,7 +61,7 @@
             if (d === decoded || !/^https?:\/\//i.test(d)) break;
             decoded = d;
           }
-          new URL(decoded); // validate
+          new URL(decoded);
           return PROXY_PATH + encodeURIComponent(decoded);
         }
       } catch(e) {}
@@ -85,17 +72,14 @@
       return clean.slice(MY_ORIGIN.length);
     }
 
-    // Absolute http/https URL
     if (/^https?:\/\//i.test(clean)) {
       return PROXY_PATH + encodeURIComponent(clean);
     }
 
-    // Protocol-relative //example.com/path
     if (clean.startsWith('//')) {
       return PROXY_PATH + encodeURIComponent('https:' + clean);
     }
 
-    // Relative path — resolve against the REAL page base
     if (realBase) {
       try {
         const abs = new URL(clean, realBase).href;
@@ -106,7 +90,7 @@
     return url;
   }
 
-  // ── Patch window.location.href ───────────────────────────────────────
+  // Patch location.href
   try {
     const desc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
     Object.defineProperty(Location.prototype, 'href', {
@@ -116,7 +100,7 @@
     });
   } catch(e) {}
 
-  // ── Patch location.assign / replace ─────────────────────────────────
+  // Patch location.assign / replace
   try {
     const _a = Location.prototype.assign;
     const _r = Location.prototype.replace;
@@ -124,13 +108,13 @@
     Location.prototype.replace = function(u) { _r.call(this, toProxy(String(u))); };
   } catch(e) {}
 
-  // ── Patch history ────────────────────────────────────────────────────
+  // Patch history
   const _push = history.pushState.bind(history);
   const _rep  = history.replaceState.bind(history);
   history.pushState    = (s,t,u) => _push(s, t, u != null ? toProxy(String(u)) : u);
   history.replaceState = (s,t,u) => _rep(s,  t, u != null ? toProxy(String(u)) : u);
 
-  // ── Patch fetch() ────────────────────────────────────────────────────
+  // Patch fetch
   const _fetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     if (input instanceof Request) {
@@ -145,17 +129,17 @@
     return _fetch(input, init);
   };
 
-  // ── Patch XMLHttpRequest ─────────────────────────────────────────────
+  // Patch XHR
   const _open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(m, u, ...r) {
     return _open.call(this, m, toProxy(String(u)), ...r);
   };
 
-  // ── Patch window.open ────────────────────────────────────────────────
+  // Patch window.open
   const _wopen = window.open.bind(window);
   window.open = (u, ...a) => _wopen(u ? toProxy(String(u)) : u, ...a);
 
-  // ── Intercept <a> clicks ─────────────────────────────────────────────
+  // Intercept <a> clicks
   document.addEventListener('click', function(e) {
     const a = e.target.closest('a[href]');
     if (!a) return;
@@ -169,7 +153,7 @@
     }
   }, true);
 
-  // ── Intercept <form> submits ─────────────────────────────────────────
+  // Intercept form submits
   document.addEventListener('submit', function(e) {
     const f = e.target;
     if (f.action) {
@@ -178,15 +162,14 @@
     }
   }, true);
 
-  // ── Patch createElement ──────────────────────────────────────────────
+  // Patch createElement
   const _create = document.createElement.bind(document);
   document.createElement = function(tag, ...args) {
     const el = _create(tag, ...args);
     const t  = tag.toLowerCase();
     if (t === 'script' || t === 'img' || t === 'iframe') {
       try {
-        const proto = Object.getPrototypeOf(el);
-        const d = Object.getOwnPropertyDescriptor(proto, 'src');
+        const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'src');
         if (d) Object.defineProperty(el, 'src', {
           set(v) { d.set.call(this, toProxy(String(v))); },
           get()  { return d.get.call(this); },
