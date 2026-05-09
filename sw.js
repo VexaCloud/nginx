@@ -1,6 +1,4 @@
 // sw.js — VexaProxy Service Worker
-// Uses Referer header to resolve relative paths — works without postMessage race conditions.
-
 const PROXY_PATH = '/proxy?url=';
 const OWN_PATHS  = new Set(['/sw.js', '/proxy-bootstrap.js', '/index.html', '/health']);
 
@@ -17,16 +15,15 @@ self.addEventListener('fetch', (event) => {
   // Already a proxy request — let nginx handle it
   if (url.pathname.startsWith('/proxy')) return;
 
-  // External URL — route straight through proxy
+  // External absolute URL — route through proxy
   if (url.origin !== self.location.origin) {
     event.respondWith(doProxyFetch(req.url, req));
     return;
   }
 
-  // Request to our own origin that isn't a static file or proxy path.
-  // This is a relative-path resource from inside a proxied page
-  // e.g. <img src="/images/logo.png"> or fetch('/api/v1/data')
-  // Recover the real base from the Referer header.
+  // Relative-path resource from inside a proxied page
+  // e.g. <img src="/images/logo.png"> or fetch('/api/data')
+  // Recover real base from Referer header
   const realBase = getRealBaseFromReferer(req.referrer);
   if (realBase) {
     try {
@@ -39,13 +36,10 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
-// Parse the real proxied URL out of a referrer like:
-// https://shiny-giggle-...app.github.dev/proxy?url=https%3A%2F%2Fwww.crazygames.com%2F
 function getRealBaseFromReferer(referrer) {
   if (!referrer) return null;
   try {
     const ref = new URL(referrer);
-    // Works on any domain — just needs /proxy?url= path
     if (ref.pathname.startsWith('/proxy')) {
       const inner = ref.searchParams.get('url');
       if (inner) return decodeURIComponent(inner);
