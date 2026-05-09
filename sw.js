@@ -1,42 +1,67 @@
 // sw.js — VexaProxy Service Worker
-const PROXY_PATH = '/proxy?url=';
-const OWN_PATHS  = new Set(['/sw.js', '/proxy-bootstrap.js', '/index.html', '/health']);
+// Intercepts ALL fetches from proxied pages and routes them through /proxy?url=
+// Uses <base> tag approach: browser resolves relative URLs to absolute real-site URLs,
+// SW then intercepts those absolute external URLs and proxies them.
 
-self.addEventListener('install',  () => self.skipWaiting());
-self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+const PROXY_PATH = '/proxy?url=';
+
+// Static files served from our own server — never intercept these
+const OWN_STATIC = new Set([
+  '/sw.js', '/proxy-bootstrap.js', '/index.html', '/health', '/favicon.ico'
+]);
+
+self.addEventListener('install', () => {
+  // Take over immediately — don't wait for old SW to die
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  // Claim all open clients immediately so this SW controls them right away
+  event.waitUntil(self.clients.claim());
+});
 
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
 
-  // Never touch our own static files
-  if (OWN_PATHS.has(url.pathname)) return;
+  // ── Never intercept our own static files ──────────────────────────────
+  if (OWN_STATIC.has(url.pathname)) return;
 
-  // Already a proxy request — let nginx handle it
+  // ── Never intercept already-proxied requests (avoid loops) ───────────
   if (url.pathname.startsWith('/proxy')) return;
 
-  // External absolute URL — route through proxy
+  // ── External absolute URL (e.g. http://www.crazygames.com/style.css) ─
+  // This is what happens AFTER the <base> tag resolves relative paths:
+  // <link href="/style.css"> + <base href="https://www.crazygames.com/">
+  //   -> browser requests https://www.crazygames.com/style.css
+  //   -> SW intercepts it here and proxies it
   if (url.origin !== self.location.origin) {
     event.respondWith(doProxyFetch(req.url, req));
     return;
   }
 
-  // Relative-path resource from inside a proxied page
-  // e.g. <img src="/images/logo.png"> or fetch('/api/data')
-  // Recover real base from Referer header
-  const realBase = getRealBaseFromReferer(req.referrer);
+  // ── Same-origin request that isn't a static file or /proxy ───────────
+  // This happens when JS does fetch('/api/data') and the base tag is missing
+  // or when the page was loaded before SW was active.
+  // Try to recover the real base URL from the Referer header.
+  const realBase = extractRealBase(req.referrer);
   if (realBase) {
     try {
       const absolute = new URL(url.pathname + url.search + url.hash, realBase).href;
+      // Make sure we didn't resolve back to our own origin
       if (!absolute.startsWith(self.location.origin)) {
         event.respondWith(doProxyFetch(absolute, req));
         return;
       }
     } catch(e) {}
   }
+
+  // All other same-origin requests: let through normally
 });
 
-function getRealBaseFromReferer(referrer) {
+// Extract the real proxied URL from a Referer like:
+// https://shiny-giggle-....github.dev/proxy?url=https%3A%2F%2Fwww.crazygames.com%2F
+function extractRealBase(referrer) {
   if (!referrer) return null;
   try {
     const ref = new URL(referrer);
@@ -49,7 +74,8 @@ function getRealBaseFromReferer(referrer) {
 }
 
 function doProxyFetch(targetUrl, req) {
-  const clean   = fullyDecode(targetUrl);
+  // Decode any accidental double-encoding
+  const clean = fullyDecode(targetUrl);
   const proxied = self.location.origin + PROXY_PATH + encodeURIComponent(clean);
 
   return fetch(proxied, {
@@ -58,7 +84,12 @@ function doProxyFetch(targetUrl, req) {
     body:        req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
     redirect:    'follow',
     credentials: 'omit',
-  }).catch(() => new Response('Proxy fetch failed', { status: 502 }));
+  }).catch((err) => {
+    return new Response('Proxy error: ' + err.message, {
+      status: 502,
+      headers: { 'Content-Type': 'text/plain' }
+    });
+  });
 }
 
 function fullyDecode(url) {
@@ -75,7 +106,10 @@ function fullyDecode(url) {
 }
 
 function sanitizeHeaders(headers) {
-  const blocked = new Set(['cookie','authorization','x-forwarded-for','x-real-ip','origin','referer']);
+  const blocked = new Set([
+    'cookie', 'authorization', 'x-forwarded-for',
+    'x-real-ip', 'origin', 'referer'
+  ]);
   const out = new Headers();
   for (const [k, v] of headers.entries()) {
     if (!blocked.has(k.toLowerCase())) out.set(k, v);
