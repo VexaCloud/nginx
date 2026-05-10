@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Proxy Error</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #090b10; color: #e8edf5;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    }
+    .container { text-align: center; padding: 40px 24px; max-width: 520px; }
+    .icon { font-size: 64px; margin-bottom: 16px; }
+    h1 { font-size: 28px; margin-bottom: 8px; }
+    p { color: #5a6478; margin-bottom: 8px; font-size: 15px; }
+    .url { color: #7b4fff; font-size: 13px; word-break: break-all; margin-bottom: 32px; font-family: monospace; }
+    .btn {
+      display: inline-block; background: #00e5ff; color: #000;
+      padding: 12px 28px; border-radius: 6px; text-decoration: none;
+      font-weight: 700; font-size: 14px; margin: 0 8px;
+      transition: opacity .2s;
+    }
+    .btn:hover { opacity: .85; }
+    .btn.secondary { background: transparent; color: #00e5ff; border: 1px solid #00e5ff; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">⚠️</div>
+    <h1>Could Not Reach Site</h1>
+    <p>The site you're trying to visit couldn't be loaded through the proxy.</p>
+    <p>This could be because the site is down, blocked, or requires a direct connection.</p>
+    <div class="url" id="url"></div>
+    <a class="btn" href="/">Go Home</a>
+    <a class="btn secondary" onclick="location.reload(); return false;" href="#">Retry</a>
+  </div>
+  <script>
+    // Show which URL failed
+    var params = new URLSearchParams(location.search);
+    var url = params.get('url');
+    if (url) document.getElementById('url').textContent = decodeURIComponent(url);
+  </script>
+</body>
+</html>
