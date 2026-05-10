@@ -1,1 +1,0 @@
-There are still serveral problems, such as the localhost redirection when you forget to add www, the 404 page error, and the failure to load files. It might be that they don't load or take forever to. Do extensive research and testing, and do not respond until it's absolutely perfect. I NEED THIS TO WORK!
