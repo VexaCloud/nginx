@@ -1,79 +1,65 @@
 // sw.js — VexaProxy Service Worker
-const PROXY_PATH = '/proxy?url=';
-const OWN_STATIC = new Set([
-  '/sw.js', '/proxy-bootstrap.js', '/index.html',
-  '/health', '/favicon.ico', '/404.html', '/proxy-error.html'
-]);
+var PROXY_PATH = '/proxy?url=';
+var OWN = ['/sw.js','/proxy-bootstrap.js','/index.html','/health','/favicon.ico','/404.html','/proxy-error.html'];
 
-self.addEventListener('install',  () => self.skipWaiting());
-self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener('install',  function() { self.skipWaiting(); });
+self.addEventListener('activate', function(e) { e.waitUntil(self.clients.claim()); });
 
-self.addEventListener('fetch', (event) => {
-  const req = event.request;
-  const url = new URL(req.url);
+self.addEventListener('fetch', function(event) {
+  var req = event.request;
+  var url; try { url = new URL(req.url); } catch(e) { return; }
 
-  // Never touch our own static files
-  if (OWN_STATIC.has(url.pathname)) return;
+  if (OWN.indexOf(url.pathname) !== -1) return;
+  if (url.pathname.indexOf('/proxy') === 0) return;
 
-  // Already a proxied request — pass through
-  if (url.pathname.startsWith('/proxy')) return;
-
-  // External absolute URL — route through proxy
   if (url.origin !== self.location.origin) {
     event.respondWith(doProxyFetch(req.url, req));
     return;
   }
 
-  // Same-origin request that isn't a proxy or static file.
-  // This is a relative-path fetch from inside a proxied page
-  // (e.g. fetch('/api/data') when JS ran before <base> tag took effect)
-  // Recover real base from Referer header.
-  const realBase = extractRealBase(req.referrer);
+  var realBase = extractRealBase(req.referrer);
   if (realBase) {
     try {
-      const absolute = new URL(url.pathname + url.search + url.hash, realBase).href;
-      if (!absolute.startsWith(self.location.origin)) {
-        event.respondWith(doProxyFetch(absolute, req));
+      var abs = new URL(url.pathname + url.search + url.hash, realBase).href;
+      if (abs.indexOf(self.location.origin) !== 0) {
+        event.respondWith(doProxyFetch(abs, req));
         return;
       }
     } catch(e) {}
   }
-
-  // Let other same-origin requests through (our own static files etc.)
 });
 
-function extractRealBase(referrer) {
-  if (!referrer) return null;
+function extractRealBase(ref) {
+  if (!ref) return null;
   try {
-    const ref = new URL(referrer);
-    if (ref.pathname.startsWith('/proxy')) {
-      const inner = ref.searchParams.get('url');
-      if (inner) return decodeURIComponent(inner);
+    var r = new URL(ref);
+    if (r.pathname.indexOf('/proxy') === 0) {
+      var u = r.searchParams.get('url');
+      if (u) return decodeURIComponent(u);
     }
   } catch(e) {}
   return null;
 }
 
 function doProxyFetch(targetUrl, req) {
-  const clean = fullyDecode(targetUrl);
-  const proxied = self.location.origin + PROXY_PATH + encodeURIComponent(clean);
+  var clean = fullyDecode(targetUrl);
+  var proxied = self.location.origin + PROXY_PATH + encodeURIComponent(clean);
   return fetch(proxied, {
-    method:      req.method,
-    headers:     sanitizeHeaders(req.headers),
-    body:        req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
-    redirect:    'follow',
+    method: req.method,
+    headers: sanitize(req.headers),
+    body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
+    redirect: 'follow',
     credentials: 'omit',
-  }).catch((err) => new Response('Proxy error: ' + err, {
-    status: 502,
-    headers: { 'Content-Type': 'text/plain' },
-  }));
+  }).catch(function(e) {
+    return new Response('Proxy error: ' + e, { status: 502, headers: {'Content-Type':'text/plain'} });
+  });
 }
 
 function fullyDecode(url) {
   try {
-    let s = url;
-    for (let i = 0; i < 3; i++) {
-      const d = decodeURIComponent(s);
+    var s = url;
+    for (var i = 0; i < 3; i++) {
+      var d = decodeURIComponent(s);
       if (d === s || !/^https?:\/\//i.test(d)) break;
       s = d;
     }
@@ -81,14 +67,13 @@ function fullyDecode(url) {
   } catch(e) { return url; }
 }
 
-function sanitizeHeaders(headers) {
-  const blocked = new Set([
-    'cookie', 'authorization', 'x-forwarded-for',
-    'x-real-ip', 'origin', 'referer'
-  ]);
-  const out = new Headers();
-  for (const [k, v] of headers.entries()) {
-    if (!blocked.has(k.toLowerCase())) out.set(k, v);
-  }
+function sanitize(headers) {
+  var blocked = ['cookie','authorization','x-forwarded-for','x-real-ip','origin','referer',
+    'sec-fetch-site','sec-fetch-mode','sec-fetch-dest','sec-fetch-user',
+    'sec-ch-ua','sec-ch-ua-mobile','sec-ch-ua-platform'];
+  var out = new Headers();
+  headers.forEach(function(v, k) {
+    if (blocked.indexOf(k.toLowerCase()) === -1) out.set(k, v);
+  });
   return out;
 }
