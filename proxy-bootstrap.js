@@ -5,8 +5,7 @@
   var MY_ORIGIN  = window.location.origin;
   var PROXY_PATH = '/proxy?url=';
 
-  // ── Get real URL dynamically (re-read on every call) ─────────────────
-  // Must be dynamic: history.pushState changes window.location
+  // Dynamic — re-read on every call because history.pushState changes window.location
   function getRealBase() {
     try {
       var raw = new URLSearchParams(window.location.search).get('url');
@@ -14,8 +13,7 @@
       var u = raw;
       for (var i = 0; i < 3; i++) {
         var d = decodeURIComponent(u);
-        if (d === u) break;
-        if (!/^https?:\/\//i.test(d)) break;
+        if (d === u || !/^https?:\/\//i.test(d)) break;
         u = d;
       }
       return new URL(u).href;
@@ -26,8 +24,7 @@
     try { var b = getRealBase(); return b ? new URL(b).origin : null; } catch(e) { return null; }
   }
 
-  // ── Fix <base> tags ───────────────────────────────────────────────────
-  // nginx injects ours first. Remove any the page added after it.
+  // Fix <base> tags — keep ours (first), remove any the page added
   function fixBaseTags() {
     var bases = document.querySelectorAll('base');
     var origin = getRealOrigin();
@@ -41,43 +38,33 @@
     document.addEventListener('DOMContentLoaded', fixBaseTags);
   }
 
-  // ── Favicon injection ─────────────────────────────────────────────────
-  // Browsers auto-fetch /favicon.ico relative to page URL, ignoring <base>.
-  // We intercept by injecting an explicit <link rel="icon"> pointing through proxy.
+  // Inject favicon through proxy
   function injectFavicon() {
     var origin = getRealOrigin();
     if (!origin) return;
-
-    // Check if page already has a favicon link
     var existing = document.querySelector('link[rel~="icon"]');
     if (existing) {
-      // It may have a relative URL that resolves correctly via <base>
-      // but double-check it goes through the proxy
       var href = existing.getAttribute('href') || '';
       if (href && href.indexOf(PROXY_PATH) === -1 && href.indexOf('data:') !== 0) {
         try {
           var abs = new URL(href, origin + '/').href;
-          existing.href = PROXY_PATH + encodeURIComponent(abs);
+          existing.setAttribute('href', PROXY_PATH + encodeURIComponent(abs));
         } catch(e) {}
       }
       return;
     }
-
-    // No favicon link — inject one pointing to the real site's /favicon.ico
     var link = document.createElement('link');
     link.rel = 'icon';
-    // Use setAttribute to bypass our createElement patch (avoid double-encoding)
     link.setAttribute('href', PROXY_PATH + encodeURIComponent(origin + '/favicon.ico'));
     document.head.appendChild(link);
   }
-
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', injectFavicon);
   } else {
     injectFavicon();
   }
 
-  // ── Register Service Worker ───────────────────────────────────────────
+  // Register Service Worker
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { scope: '/' })
       .then(function(reg) {
@@ -86,8 +73,7 @@
             if (this.state === 'activated') window.location.reload();
           });
         }
-      })
-      .catch(function() {});
+      }).catch(function() {});
   }
 
   // ── Core URL rewriter ─────────────────────────────────────────────────
@@ -108,8 +94,8 @@
       } catch(e) { break; }
     }
 
-    // Already proxied
-    if (clean.indexOf(PROXY_PATH) === 0) return normalizeProxied(clean);
+    // Already a proxy path — return as-is (don't double-proxy)
+    if (clean.indexOf(PROXY_PATH) === 0) return clean;
     if (clean.indexOf(MY_ORIGIN + PROXY_PATH) === 0) return clean.slice(MY_ORIGIN.length);
 
     // Absolute http/https
@@ -121,7 +107,7 @@
     // Pure query string — stays on same page
     if (clean.charAt(0) === '?') return clean;
 
-    // Relative — resolve against current real base
+    // Relative path — resolve against current real base
     var base = getRealBase();
     if (base) {
       try { return PROXY_PATH + encodeURIComponent(new URL(clean, base).href); } catch(e) {}
@@ -129,31 +115,7 @@
     return url;
   }
 
-  function normalizeProxied(clean) {
-    try {
-      var inner = new URLSearchParams('/?' + clean.slice(PROXY_PATH.length)).get('url');
-      if (inner) {
-        var decoded = fullyDecode(inner);
-        new URL(decoded);
-        return PROXY_PATH + encodeURIComponent(decoded);
-      }
-    } catch(e) {}
-    return clean;
-  }
-
-  function fullyDecode(url) {
-    try {
-      var s = url;
-      for (var i = 0; i < 3; i++) {
-        var d = decodeURIComponent(s);
-        if (d === s || !/^https?:\/\//i.test(d)) break;
-        s = d;
-      }
-      return s;
-    } catch(e) { return url; }
-  }
-
-  // ── Patch location.href ───────────────────────────────────────────────
+  // Patch location.href
   try {
     var locDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
     if (locDesc && locDesc.set) {
@@ -165,7 +127,7 @@
     }
   } catch(e) {}
 
-  // ── Patch location.assign / replace ──────────────────────────────────
+  // Patch location.assign / replace
   try {
     var _la = Location.prototype.assign;
     var _lr = Location.prototype.replace;
@@ -173,7 +135,7 @@
     Location.prototype.replace = function(u) { _lr.call(this, toProxy(String(u))); };
   } catch(e) {}
 
-  // ── Patch history ─────────────────────────────────────────────────────
+  // Patch history
   var _push = history.pushState.bind(history);
   var _rep  = history.replaceState.bind(history);
   history.pushState = function(s, t, u) {
@@ -189,7 +151,7 @@
     return _rep(s, t, toProxy(str));
   };
 
-  // ── Patch fetch() ─────────────────────────────────────────────────────
+  // Patch fetch
   var _fetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     try {
@@ -201,14 +163,14 @@
     return _fetch(input, init);
   };
 
-  // ── Patch XHR ────────────────────────────────────────────────────────
+  // Patch XHR
   var _xhrOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url, async, user, pass) {
     var p = url; try { p = toProxy(String(url)); } catch(e) {}
     return _xhrOpen.call(this, method, p, async !== undefined ? async : true, user, pass);
   };
 
-  // ── Patch window.open ─────────────────────────────────────────────────
+  // Patch window.open
   var _wopen = window.open.bind(window);
   window.open = function(u, t, f) { return _wopen(u ? toProxy(String(u)) : u, t, f); };
 
@@ -216,31 +178,37 @@
   document.addEventListener('click', function(e) {
     if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
 
-    // IMPORTANT: don't steal focus from interactive elements
     var tgt = e.target;
     if (!tgt) return;
     var tname = (tgt.tagName || '').toLowerCase();
+    // Don't intercept interactive elements — prevents search bar focus loss
     if (tname === 'input' || tname === 'textarea' ||
         tname === 'select' || tname === 'button') return;
 
     var a = tgt.closest('a[href]');
     if (!a) return;
+
+    // CRITICAL FIX: use getAttribute (raw value) NOT a.href (base-resolved).
+    // a.href with <base href="https://site.com/"> resolves /proxy?url=... to
+    // https://site.com/proxy?url=... causing double-proxying.
     var rawHref = a.getAttribute('href');
     if (!rawHref || /^(#|javascript:|mailto:|tel:)/.test(rawHref)) return;
 
-    // a.href is browser-resolved (accounts for <base> tag)
-    var resolved = a.href;
-    if (!resolved || resolved.indexOf(MY_ORIGIN + PROXY_PATH) === 0) return;
+    // If it's already a proxy path, let it through normally
+    if (rawHref.indexOf(PROXY_PATH) === 0) return;
 
-    var proxied = toProxy(resolved);
-    if (proxied !== resolved) {
+    // If it's an absolute URL pointing to our own proxy, let it through
+    if (rawHref.indexOf(MY_ORIGIN + PROXY_PATH) === 0) return;
+
+    var proxied = toProxy(rawHref);
+    if (proxied !== rawHref) {
       e.preventDefault();
       e.stopPropagation();
       window.location.href = proxied;
     }
   }, true);
 
-  // ── Intercept form submits ────────────────────────────────────────────
+  // Intercept form submits
   document.addEventListener('submit', function(e) {
     var form = e.target;
     if (!form || !form.action) return;
@@ -249,7 +217,7 @@
     if (p !== form.action) form.action = p;
   }, true);
 
-  // ── Patch createElement ───────────────────────────────────────────────
+  // Patch createElement
   var _ce = document.createElement.bind(document);
   document.createElement = function(tag) {
     var el = _ce.apply(document, arguments);
@@ -278,9 +246,8 @@
     return el;
   };
 
-  // ── MutationObserver (debounced via microtask to prevent focus loss) ──
-  var _pending = [];
-  var _timer = null;
+  // MutationObserver — debounced via microtask to prevent focus loss
+  var _pending = [], _timer = null;
   function _flush() {
     _timer = null;
     var nodes = _pending.splice(0);
@@ -293,8 +260,9 @@
         var et = (el.tagName || '').toLowerCase();
         if ((et === 'a' || et === 'link') && el.hasAttribute('href')) {
           var raw = el.getAttribute('href');
+          // Use raw attribute — don't use el.href which is base-resolved
           if (raw && raw.charAt(0) !== '#' && !/^javascript:/i.test(raw) &&
-              raw.indexOf(PROXY_PATH) !== 0) {
+              raw.indexOf(PROXY_PATH) !== 0 && raw.indexOf(MY_ORIGIN) !== 0) {
             var p = toProxy(raw);
             if (p !== raw) try { el.setAttribute('href', p); } catch(e) {}
           }
@@ -319,10 +287,10 @@
     }).observe(document.documentElement, { childList: true, subtree: true });
   } catch(e) {}
 
-  // ── WebSocket (graceful failure) ──────────────────────────────────────
+  // WebSocket — graceful failure
   try {
     var _WS = window.WebSocket;
-    window.WebSocket = function(url, protocols) {
+    window.WebSocket = function() {
       var ws = { readyState: 3, send:function(){}, close:function(){},
         addEventListener:function(){}, removeEventListener:function(){},
         dispatchEvent:function(){return false;},
